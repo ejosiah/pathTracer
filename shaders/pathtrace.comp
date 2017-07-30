@@ -4,6 +4,15 @@
 
 layout(local_size_x = 32, local_size_y = 32) in;
 
+struct HitInfo{
+    vec3 p;
+    vec3 n;
+    float t;
+    float u;
+    float v;
+    float tid;
+};
+
 struct Material {
     vec4 ambient;
     vec4 diffuse;
@@ -15,33 +24,33 @@ struct Material {
     float opacity;
 };
 
+struct Plane{
+    vec3 n;
+	Material material;
+	float d;
+};
+
 struct Triangle{
     vec3 v0, v1, v2;
     Material material;
     float tid;
 };
 
-struct Sphere {
-	vec3 center;
-	float radius;
-	Material material;
-};
-
-struct Box { 
-	vec3 min;
-	vec3 max; 
-	Material material;
-};
-
 struct Ray { vec3 origin, dir;} eyeRay;
+struct Box { vec3 min, max; };
 struct Camera{
 	vec3 U, V, W;
 	float d;
 } cam;
 
-layout(std430, binding=4) buffer TRIANGLES_SSBO{
+layout(std430, binding=0) buffer TRIANGLES_SSBO{
     Triangle triangles[38];
 };
+
+layout(std430, binding=1) buffer PLANE_SSBO{
+    Plane planes[4];
+};
+
 
 uniform mat4 invMVP;
 uniform vec4 bgColor;
@@ -50,8 +59,6 @@ uniform vec3 lightPos;
 uniform Box aabb;
 uniform float NO_OF_TRIANGLES;
 uniform float NO_OF_VERTICES;
-uniform float seed;
-uniform int SAMPLES;
 
 layout(rgba32f, binding=0) uniform image2D scene_img;
 layout(binding=1) uniform samplerBuffer vertices_tbo;
@@ -62,27 +69,37 @@ const float k0 = 1.0;
 const float k1 = 0.0;
 const float k2 = 0.0;
 const vec4 NO_HIT = vec4(-1, 0, 0, 0);
+const float EPSILON = 0.000001;
 
 vec2 getUV(){
 	vec2 uv = vec2(gl_GlobalInvocationID.xy)/(vec2(gl_NumWorkGroups.xy * gl_WorkGroupSize.xy) - vec2(1));
 	return 2 * uv - vec2(1);	// scale from [0, 1] to [-1, -1]
 }
 
-float random(vec3 scale, float seed) {		
-	return fract(sin(dot(gl_GlobalInvocationID.xyz + seed, scale)) * 43758.5453 + seed);	
-}	
+void swap(inout float a, inout float b){
+	float temp = a;
+	a = b;
+	b = temp;
+}
 
-vec3 uniformlyRandomDirection(float seed) {		
-	float u = random(vec3(12.9898, 78.233, 151.7182), seed);		
-	float v = random(vec3(63.7264, 10.873, 623.6736), seed);		
-	float z = 1.0 - 2.0 * u;		
-	float r = sqrt(1.0 - z * z);	
-	float angle = 6.283185307179586 * v;	
-	return vec3(r * cos(angle), r * sin(angle), z);	
-}	
+void swap(inout vec3 a, inout vec3 b){
+	vec3 temp = a;
+	a = b;
+	b = temp;
+}
 
-vec3 uniformlyRandomVector(float seed) {		
-	return uniformlyRandomDirection(seed) *  (random(vec3(36.7539, 50.3658, 306.2759), seed));	
+
+HitInfo intersectPlane(Ray ray, Plane p){
+    HitInfo hit;
+	hit.t = -1;
+	vec3 o = ray.origin;
+	vec3 d = ray.dir;
+	float t = (p.d - dot(p.n, o)) / dot(p.n, d);
+	if(t < 0) return hit;
+	hit.p = o + t * d;
+	hit.n = p.n;
+	hit.t = t;
+	return hit;
 }
 
 vec2 intersectCube(vec3 origin, vec3 ray, Box cube) {
@@ -114,16 +131,18 @@ void setup_camera(vec2 uv) {
 }
 
 
-vec4 intersectTriangle(vec3 origin, vec3 dir, int index,  out vec3 normal ) {
+HitInfo intersectTriangle(vec3 origin, vec3 dir, int index ) {
     Triangle tri = triangles[index];
-    vec3 v0 = tri.v2.xyz;
-    vec3 v1 = tri.v1.xyz;
-    vec3 v2 = tri.v0.xyz;
+    HitInfo info;
+    info.t = -1;
+    vec3 v0 = tri.v2;
+    vec3 v1 = tri.v1;
+    vec3 v2 = tri.v0;
 
 	if((index+1) % 2 !=0 ){
-	    v0 = tri.v1.xyz;
-        v1 = tri.v0.xyz;
-        v2 = tri.v2.xyz;
+	    v0 = tri.v1;
+        v1 = tri.v0;
+        v2 = tri.v2;
 	}
 
 	vec3 e1 = v1-v0;
@@ -138,14 +157,14 @@ vec4 intersectTriangle(vec3 origin, vec3 dir, int index,  out vec3 normal ) {
 	float u = dot(tvec, pvec) * inv_det;
 
 	if (u < 0.0 || u > 1.0)
-		return NO_HIT;
+		return info;
 
 	vec3 qvec = cross(tvec, e1);
 
 	float v = dot(dir, qvec) * inv_det;
 
 	if (v < 0.0 || (u + v) > 1.0)
-		return NO_HIT;
+		return info;
 
 	float t = dot(e2, qvec) * inv_det;
 	if((index+1) % 2 ==0 ) {
@@ -153,76 +172,38 @@ vec4 intersectTriangle(vec3 origin, vec3 dir, int index,  out vec3 normal ) {
 	} else {
 		u = 1-u;
 	} 
-	normal = normalize(cross(e2,e1));
-	return vec4(t,u,v, tri.tid);
+
+	info.t = t;
+	info.u = u;
+	info.v = v;
+	info.p = origin + t * dir;
+	info.tid = tri.tid;
+	info.n = normalize(cross(e2,e1));;
+	return info;
 }
 
 float shadow(vec3 origin, vec3 dir ) {
-	vec3 tmp;
 	for(int i=0;i<int(NO_OF_TRIANGLES);i++)
 	{
-		vec4 res = intersectTriangle(origin, dir, i, tmp);
-		if(res.x>0 ) {
+		HitInfo res = intersectTriangle(origin, dir, i);
+		if(res.t>0 ) {
 		   return 0.5;
 		}
 	}
 	return 1.0;
 }
 
-vec3 tracepath(vec3 origin, vec3 ray, vec3 light, float t){
-	vec3 colorMask = vec3(1);
-	vec3 accumulatedColor = vec3(0);
-	vec3 surfaceColor = vec3(bgColor);
+bool closestIntersectingTriangle(Ray ray, inout HitInfo hit){
+    float t = hit.t;
+    for(int i=0;i<int(NO_OF_TRIANGLES);i++)
+    {
+        HitInfo res = intersectTriangle(ray.origin, ray.dir, i);
+        if(res.t>0 && res.t <= hit.t) {
+           hit = res;
 
-	float diffuse = 1;
-
-	for(int bounce = 0; bounce < SAMPLES; bounce++){
-		vec2 tNearfar = intersectCube(origin, ray, aabb);
-		if(tNearfar.x > tNearfar.y) continue;
-
-		if(tNearfar.y < t) t = tNearfar.y + 1;
-
-		vec3 N;
-		vec4 val = vec4(t, 0, 0, 0);
-
-		for(int i = 0; i < NO_OF_TRIANGLES; i++){
-			vec3 normal;
-			vec4 res = intersectTriangle(origin, ray, i, normal);
-			if(res.x > 0.001 && res.x < val.x){
-				val = res;
-
-				N = normal;
-			}
-		}
-
-		if(val.x < t){
-			surfaceColor = mix(texture(textureMap, val.yzw), vec4(1), (val.w==255) ).xyz;
-
-			vec3 hit = origin + ray * val.x;
-			origin = hit;
-		//	if(val.w== 255){
-		//	    ray = normalize(reflect(ray, N));
-		//	}else{
-			    ray = uniformlyRandomDirection(seed + float(bounce));
-		//	}
-
-			vec3 jitteredLight = light + ray;
-			vec3 L = normalize(jitteredLight - hit);
-
-			diffuse = max(0, dot(L, N));
-			colorMask *= surfaceColor;
-
-			float inShadow = shadow(hit + N * 0.0001, L);
-
-			accumulatedColor += colorMask * diffuse * inShadow;
-		}
-	}
-
-	if(accumulatedColor == vec3(0)){	// no geometry intersect
-		return surfaceColor * diffuse;
-	}else{
-		return accumulatedColor / float(SAMPLES - 1);
-	}
+        }
+    }
+    return hit.t < t;
 }
 
 void main()
@@ -235,15 +216,32 @@ void main()
 	vec2 uv = getUV();
 	setup_camera(uv);
 
-	vec2 tNearFar = intersectCube(eyeRay.origin, eyeRay.dir, aabb);
+	vec2 tNearFar = intersectCube(eyeRay.origin, eyeRay.dir,  aabb);
+    HitInfo hit;
+	if(tNearFar.x<tNearFar.y  ) {
 
-	if(tNearFar.x < tNearFar.y){
-		t = tNearFar.y + 1;
-		vec3 light = lightPos + uniformlyRandomVector(seed);
+		t = tNearFar.y+1; //offset the near intersection to remove the depth artifacts
 
-		vec3 color = tracepath(eyeRay.origin, eyeRay.dir, light, t);
+		hit.t = t;
+		bool intersectFound = closestIntersectingTriangle(eyeRay, hit);
+		
+		if(intersectFound) {
+         //   N = normalize( N * (1 - val.y - val.z) + N * val.y + N * val.z);
+			vec3 L = (lightPos-hit.p);
+			float d = length(L);
+			L = normalize(L);
 
-		imageStore(scene_img, pos, vec4(color, 1));
+			float diffuse = max(0, dot(hit.n, L));
+
+			float attenuationAmount = 1.0/(k0 + (k1*d) + (k2*d*d));
+			diffuse *= attenuationAmount;
+
+			float inShadow = shadow(hit.p + hit.n*0.0001, L) ;
+			vec4 color = inShadow * diffuse*mix(texture(textureMap, vec3(hit.u, hit.v, hit.tid)), vec4(1), (hit.tid==255) );
+
+            imageStore(scene_img, pos, color);
+		}
+
 	}
 }
 

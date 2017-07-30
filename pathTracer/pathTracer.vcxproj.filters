@@ -27,6 +27,9 @@
     <ClInclude Include="PathTracer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="SceneObjects.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">

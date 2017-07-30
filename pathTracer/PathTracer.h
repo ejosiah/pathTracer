@@ -9,6 +9,7 @@
 #include <ncl/gl/Scene.h>
 #include <ncl/gl/CrossHair.h>
 #include <ncl/gl/rayTracingUtilities.h>
+#include "SceneObjects.h"
 
 using namespace std;
 using namespace ncl;
@@ -21,6 +22,7 @@ class PathTracer : public Scene {
 public:
 	PathTracer() : Scene("Path Tracer scene", 1280, 960) {
 		_useImplictShaderLoad = true;
+	
 		addShader("flat", GL_VERTEX_SHADER, identity_vert_shader);
 		addShader("flat", GL_FRAGMENT_SHADER, identity_frag_shader);
 	}
@@ -212,14 +214,8 @@ public:
 			triangle_ssbo.triangles.push_back(tri);
 		}
 
-	//	scene.scene.min = vec4(model->bound->min(), 0);
-	//	scene.scene.max = vec4(model->bound->max(), 0);
 		Box box; ray_tracing::Sphere sphere;
-	//	scene.boxes.push_back(box);
-	//	scene.spheres.push_back(sphere);
 
-	//	scene.scene.min = vec4(1, 0, 0, 1);
-	//	scene.scene.max = vec4(0, 1, 0, 1);
 		vec3 min = model->bound->min();
 		vec3 max = model->bound->max();
 		forShaders({ "pathtrace" }, [&](Shader& s) {
@@ -227,7 +223,7 @@ public:
 			glGenBuffers(1, &tri_ssbo);
 			glBindBuffer(GL_SHADER_STORAGE_BUFFER, tri_ssbo);
 			glBufferData(GL_SHADER_STORAGE_BUFFER, size, NULL, GL_DYNAMIC_COPY);
-			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, tri_ssbo);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, tri_ssbo);
 			unsigned int noOfTriangles = indices.size() / 4;
 			s.sendUniform1f("NO_OF_TRIANGLES", noOfTriangles);
 			s.sendUniform3fv("aabb.min", 1, value_ptr(min));
