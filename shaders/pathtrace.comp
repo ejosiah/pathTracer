@@ -4,15 +4,6 @@
 
 layout(local_size_x = 32, local_size_y = 32) in;
 
-struct HitInfo{
-    vec3 p;
-    vec3 n;
-    float t;
-    float u;
-    float v;
-    float tid;
-};
-
 struct Material {
     vec4 ambient;
     vec4 diffuse;
@@ -24,9 +15,26 @@ struct Material {
     float opacity;
 };
 
+struct HitInfo{
+    vec3 p;
+    vec3 n;
+    float t;
+    float t1;
+    float u;
+    float v;
+    float tid;
+    vec4 mat;
+};
+
+struct Sphere{
+    vec3 center;
+    vec4 mat;
+    float radius;
+};
+
 struct Plane{
     vec3 n;
-	Material material;
+	vec4 mat;
 	float d;
 };
 
@@ -48,7 +56,11 @@ layout(std430, binding=0) buffer TRIANGLES_SSBO{
 };
 
 layout(std430, binding=1) buffer PLANE_SSBO{
-    Plane planes[4];
+    Plane planes[5];
+};
+
+layout(std430, binding=2) buffer SPHERE_SSBO{
+    Sphere spheres[1];
 };
 
 
@@ -68,8 +80,27 @@ layout(binding=3) uniform sampler2DArray textureMap;
 const float k0 = 1.0;
 const float k1 = 0.0;
 const float k2 = 0.0;
-const vec4 NO_HIT = vec4(-1, 0, 0, 0);
 const float EPSILON = 0.000001;
+
+HitInfo newHitInfo(float t){
+    HitInfo info;
+    info.t = t;
+    info.t = info.u = info.v = 0;
+    return info;
+}
+
+HitInfo newHitInfo(float t, float u, float v, float tid, vec3 n, vec3 o, vec3 d){
+    HitInfo info;
+    info.t = t;
+    info.u = u;
+    info.v = v;
+    info.tid = tid;
+    info.n = n;
+    info.p =  o + t * d;
+    return info;
+}
+
+const HitInfo NO_HIT = newHitInfo(-1);
 
 vec2 getUV(){
 	vec2 uv = vec2(gl_GlobalInvocationID.xy)/(vec2(gl_NumWorkGroups.xy * gl_WorkGroupSize.xy) - vec2(1));
@@ -95,11 +126,36 @@ HitInfo intersectPlane(Ray ray, Plane p){
 	vec3 o = ray.origin;
 	vec3 d = ray.dir;
 	float t = (p.d - dot(p.n, o)) / dot(p.n, d);
-	if(t < 0) return hit;
+	if(t < 0) return NO_HIT;
 	hit.p = o + t * d;
 	hit.n = p.n;
 	hit.t = t;
+	hit.mat = p.mat;
 	return hit;
+}
+
+HitInfo intersectSphere(Ray ray, Sphere s){
+    vec3 m = ray.origin - s.center;
+    float b = dot(m, ray.dir);
+    float c = dot(m, m) - s.radius * s.radius;
+
+    if(c > 0.0f && b > 0.0f) return NO_HIT;
+
+    float discr = b*b - c;
+
+    if(discr < 0.0f) return NO_HIT;
+
+    float t = -b - sqrt(discr);
+    float t1 = t + 2 * b;
+   // if(t < 0.0f) t = 0.0f;   // ray started inside sphere*/
+
+    HitInfo hit;
+    hit.t = t;
+    hit.t1 = 255;
+    hit.p = ray.origin + t * ray.dir;
+    hit.n = normalize(hit.p - s.center);
+    hit.mat = s.mat;
+    return hit;
 }
 
 vec2 intersectCube(vec3 origin, vec3 ray, Box cube) {
@@ -133,8 +189,6 @@ void setup_camera(vec2 uv) {
 
 HitInfo intersectTriangle(vec3 origin, vec3 dir, int index ) {
     Triangle tri = triangles[index];
-    HitInfo info;
-    info.t = -1;
     vec3 v0 = tri.v2;
     vec3 v1 = tri.v1;
     vec3 v2 = tri.v0;
@@ -157,14 +211,14 @@ HitInfo intersectTriangle(vec3 origin, vec3 dir, int index ) {
 	float u = dot(tvec, pvec) * inv_det;
 
 	if (u < 0.0 || u > 1.0)
-		return info;
+		return NO_HIT;
 
 	vec3 qvec = cross(tvec, e1);
 
 	float v = dot(dir, qvec) * inv_det;
 
 	if (v < 0.0 || (u + v) > 1.0)
-		return info;
+		return NO_HIT;
 
 	float t = dot(e2, qvec) * inv_det;
 	if((index+1) % 2 ==0 ) {
@@ -173,13 +227,7 @@ HitInfo intersectTriangle(vec3 origin, vec3 dir, int index ) {
 		u = 1-u;
 	} 
 
-	info.t = t;
-	info.u = u;
-	info.v = v;
-	info.p = origin + t * dir;
-	info.tid = tri.tid;
-	info.n = normalize(cross(e2,e1));;
-	return info;
+	return newHitInfo(t, u, v, tri.tid, normalize(cross(e2,e1)), origin, dir);
 }
 
 float shadow(vec3 origin, vec3 dir ) {
@@ -206,6 +254,39 @@ bool closestIntersectingTriangle(Ray ray, inout HitInfo hit){
     return hit.t < t;
 }
 
+bool closestIntersectingPlane(Ray ray, inout HitInfo hit){
+    float t = hit.t;
+    for(int i = 0; i < 5; i++){
+        HitInfo res = intersectPlane(ray, planes[i]);
+       if(res.t>0 && res.t <= hit.t) {
+          hit = res;
+
+       }
+    }
+    return hit.t < t;
+}
+
+bool closestIntersectingSphere(Ray ray, inout HitInfo hit){
+    float t = hit.t;
+
+    for(int i = 0; i < 1; i++){
+        HitInfo res = intersectSphere(ray, spheres[i]);
+       if(res.t>0 && res.t < hit.t) {
+          hit = res;
+       }
+    }
+    return hit.t < t;
+}
+
+
+bool closestIntersection(Ray ray, inout HitInfo hit){
+    float t = hit.t;
+//    closestIntersectingSphere(ray, hit);
+    closestIntersectingPlane(ray, hit);
+
+    return hit.t < t;
+}
+
 void main()
 {
 	ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
@@ -223,7 +304,7 @@ void main()
 		t = tNearFar.y+1; //offset the near intersection to remove the depth artifacts
 
 		hit.t = t;
-		bool intersectFound = closestIntersectingTriangle(eyeRay, hit);
+		bool intersectFound = closestIntersection(eyeRay, hit);
 		
 		if(intersectFound) {
          //   N = normalize( N * (1 - val.y - val.z) + N * val.y + N * val.z);
@@ -237,11 +318,15 @@ void main()
 			diffuse *= attenuationAmount;
 
 			float inShadow = shadow(hit.p + hit.n*0.0001, L) ;
-			vec4 color = inShadow * diffuse*mix(texture(textureMap, vec3(hit.u, hit.v, hit.tid)), vec4(1), (hit.tid==255) );
+		//	vec4 color = inShadow * diffuse*mix(texture(textureMap, vec3(hit.u, hit.v, hit.tid)), vec4(1), (hit.tid==255) );
+			vec4 color = diffuse * hit.mat;
 
             imageStore(scene_img, pos, color);
+            if(hit.t1 == 255) imageStore(scene_img, pos, vec4(1, 1, 0, 1));
 		}
 
 	}
+	//vec4 color = spheres[0].mat;
+	//imageStore(scene_img, pos, color);
 }
 

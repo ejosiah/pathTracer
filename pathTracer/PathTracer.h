@@ -22,9 +22,6 @@ class PathTracer : public Scene {
 public:
 	PathTracer() : Scene("Path Tracer scene", 1280, 960) {
 		_useImplictShaderLoad = true;
-	
-		addShader("flat", GL_VERTEX_SHADER, identity_vert_shader);
-		addShader("flat", GL_FRAGMENT_SHADER, identity_frag_shader);
 	}
 
 	virtual void init() override {
@@ -59,7 +56,8 @@ public:
 		cam.view = translate(mat4(1), { 0, 0, dist });
 		cam.view = rotate(cam.view, radians(pitch), { 1, 0, 0 });
 		cam.view = rotate(cam.view, radians(yaw), { 0, 1, 0 });
-		pathTrace();
+		cam.view = lookAt({ 0, 0, 120 }, vec3(0, 0, 0), { 0, 1, 0 });
+		tracePath();
 		renderText();
 		glDisable(GL_DEPTH_TEST);
 		renderCrossHair();
@@ -67,15 +65,22 @@ public:
 
 	}
 
-	void pathTrace() {
+	void tracePath() {
 		vec3 lightPos = vec3(light[0].position);
 		mat4 invMV = inverse(cam.view);
 		mat4 invMVP = inverse(cam.projection * cam.view);
 		vec3 eyes = column(invMV, 3).xyz;
+		lightPos = eyes;
 		float currentTime = Timer::get().now();
 		shader("pathtrace")([&](Shader& s) {
 			glBindBuffer(GL_SHADER_STORAGE_BUFFER, tri_ssbo);
 			glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeOf(triangle_ssbo), &triangle_ssbo.triangles[0]);
+
+			glBindBuffer(GL_SHADER_STORAGE_BUFFER, plane_ssbo);
+			glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(ray_tracing::Plane) * planes.size(), &planes[0]);
+
+			glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphere_ssbo);
+			glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(ray_tracing::Sphere) * spheres.size(), &spheres[0]);
 
 			glActiveTexture(GL_TEXTURE0);
 			glBindImageTexture(0, scene_img, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
@@ -216,14 +221,32 @@ public:
 
 		Box box; ray_tracing::Sphere sphere;
 
-		vec3 min = model->bound->min();
-		vec3 max = model->bound->max();
+		auto res = initSceneObjects();
+		planes = get<0>(res);
+		spheres = get<1>(res);
+
+		vec3 min = vec3(-51, -101, -101);  // model->bound->min();
+		vec3 max = vec3(51, 101, 101);// model->bound->max();
+
 		forShaders({ "pathtrace" }, [&](Shader& s) {
 			size_t size = sizeOf(triangle_ssbo);
 			glGenBuffers(1, &tri_ssbo);
 			glBindBuffer(GL_SHADER_STORAGE_BUFFER, tri_ssbo);
 			glBufferData(GL_SHADER_STORAGE_BUFFER, size, NULL, GL_DYNAMIC_COPY);
 			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, tri_ssbo);
+
+			size = sizeof(ray_tracing::Plane) * planes.size();
+			glGenBuffers(1, &plane_ssbo);
+			glBindBuffer(GL_SHADER_STORAGE_BUFFER, plane_ssbo);
+			glBufferData(GL_SHADER_STORAGE_BUFFER, size, NULL, GL_DYNAMIC_COPY);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, plane_ssbo);
+
+			size = sizeof(ray_tracing::Sphere) * spheres.size();
+			glGenBuffers(1, &sphere_ssbo);
+			glBindBuffer(GL_SHADER_STORAGE_BUFFER, sphere_ssbo);
+			glBufferData(GL_SHADER_STORAGE_BUFFER, size, NULL, GL_DYNAMIC_COPY);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, sphere_ssbo);
+
 			unsigned int noOfTriangles = indices.size() / 4;
 			s.sendUniform1f("NO_OF_TRIANGLES", noOfTriangles);
 			s.sendUniform3fv("aabb.min", 1, value_ptr(min));
@@ -294,6 +317,10 @@ private:
 	float samples = 3;
 	GLuint scene_img;
 	GLuint tri_ssbo;
+	GLuint plane_ssbo;
+	GLuint sphere_ssbo;
 	ray_tracing::SSBOTriangleData triangle_ssbo;
+	vector<ray_tracing::Plane> planes;
+	vector<ray_tracing::Sphere> spheres;
 	Font* font;
 };
