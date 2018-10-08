@@ -4,6 +4,14 @@
 
 layout(local_size_x = 32, local_size_y = 32) in;
 
+#define PI                    3.1415926535897932384626422832795028841971
+#define TWO_PI				  6.2831853071795864769252867665590057683943
+#define SQRT_OF_ONE_THIRD     0.5773502691896257645091487805019574556476
+
+#define SPHERE 0
+#define PLANE 1
+#define TRIANGLE 2
+
 struct Material {
     vec4 ambient;
     vec4 diffuse;
@@ -13,6 +21,7 @@ struct Material {
     float shininess;
     float ior;
     float opacity;
+	float f0;
 };
 
 struct HitInfo{
@@ -23,18 +32,37 @@ struct HitInfo{
     float u;
     float v;
     float tid;
-    vec4 mat;
+    int i;
+    int type;
+    bool isLight;
+    Material mat;
 };
 
 struct Sphere{
     vec3 center;
-    vec4 mat;
+    vec4 ambient;
+    vec4 diffuse;
+    vec4 specular;
+    vec4 transmittance;
+    vec4 emission;
+    float shininess;
+    float ior;
+    float opacity;
+	float f0;
     float radius;
 };
 
 struct Plane{
     vec3 n;
-	vec4 mat;
+    vec4 ambient;
+    vec4 diffuse;
+    vec4 specular;
+    vec4 transmittance;
+    vec4 emission;
+    float shininess;
+    float ior;
+    float opacity;
+	float f0;
 	float d;
 };
 
@@ -51,6 +79,7 @@ struct Camera{
 	float d;
 } cam;
 
+const int NO_SPHERES = 5;
 layout(std430, binding=0) buffer TRIANGLES_SSBO{
     Triangle triangles[38];
 };
@@ -60,7 +89,7 @@ layout(std430, binding=1) buffer PLANE_SSBO{
 };
 
 layout(std430, binding=2) buffer SPHERE_SSBO{
-    Sphere spheres[1];
+    Sphere spheres[NO_SPHERES];
 };
 
 
@@ -71,6 +100,7 @@ uniform vec3 lightPos;
 uniform Box aabb;
 uniform float NO_OF_TRIANGLES;
 uniform float NO_OF_VERTICES;
+uniform float seed;
 
 layout(rgba32f, binding=0) uniform image2D scene_img;
 layout(binding=1) uniform samplerBuffer vertices_tbo;
@@ -81,6 +111,17 @@ const float k0 = 1.0;
 const float k1 = 0.0;
 const float k2 = 0.0;
 const float EPSILON = 0.000001;
+const vec3 globalAmb = vec3(0.02, 0.02, 0.02);
+const int iterations = 5;
+
+struct Light{
+    vec3 pos;
+    vec3 color;
+};
+
+float random(vec3 scale, float seed) {
+	return fract(sin(dot(gl_GlobalInvocationID.xyz + seed, scale)) * 43758.5453 + seed);
+}
 
 HitInfo newHitInfo(float t){
     HitInfo info;
@@ -101,6 +142,13 @@ HitInfo newHitInfo(float t, float u, float v, float tid, vec3 n, vec3 o, vec3 d)
 }
 
 const HitInfo NO_HIT = newHitInfo(-1);
+HitInfo possibleHit;
+
+float Fresnel(vec3 N, vec3 V, float f0){
+    float cosX = clamp(dot(N, V), 0.0, 1.0);
+    float x = 1.0 - cosX;
+    return f0 + (1.0 - f0) * pow(x, 5);
+}
 
 vec2 getUV(){
 	vec2 uv = vec2(gl_GlobalInvocationID.xy)/(vec2(gl_NumWorkGroups.xy * gl_WorkGroupSize.xy) - vec2(1));
@@ -120,42 +168,28 @@ void swap(inout vec3 a, inout vec3 b){
 }
 
 
-HitInfo intersectPlane(Ray ray, Plane p){
-    HitInfo hit;
+void intersectPlane(Ray ray, Plane p, out HitInfo hit){
 	hit.t = -1;
 	vec3 o = ray.origin;
 	vec3 d = ray.dir;
-	float t = (p.d - dot(p.n, o)) / dot(p.n, d);
-	if(t < 0) return NO_HIT;
-	hit.p = o + t * d;
-	hit.n = p.n;
-	hit.t = t;
-	hit.mat = p.mat;
-	return hit;
+	hit.t = (p.d - dot(p.n, o)) / dot(p.n, d);
 }
 
-HitInfo intersectSphere(Ray ray, Sphere s){
+void intersectSphere(Ray ray, Sphere s, out HitInfo hit){
+    hit.t = -1;
     vec3 m = ray.origin - s.center;
     float b = dot(m, ray.dir);
     float c = dot(m, m) - s.radius * s.radius;
 
-    if(c > 0.0f && b > 0.0f) return NO_HIT;
+    if(c > 0.0f && b > 0.0f) return;
 
     float discr = b*b - c;
 
-    if(discr < 0.0f) return NO_HIT;
+    if(discr < 0.0f) return;
 
-    float t = -b - sqrt(discr);
-    float t1 = t + 2 * b;
    // if(t < 0.0f) t = 0.0f;   // ray started inside sphere*/
-
-    HitInfo hit;
-    hit.t = t;
-    hit.t1 = 255;
-    hit.p = ray.origin + t * ray.dir;
-    hit.n = normalize(hit.p - s.center);
-    hit.mat = s.mat;
-    return hit;
+    hit.t = -b - sqrt(discr);
+    hit.t1 = hit.t + 2 * b;
 }
 
 vec2 intersectCube(vec3 origin, vec3 ray, Box cube) {
@@ -184,6 +218,7 @@ void setup_camera(vec2 uv) {
   eyeRay.dir = get_direction(uv , cam);
   eyeRay.dir += cam.U*uv.x;
   eyeRay.dir += cam.V*uv.y;
+  eyeRay.dir = normalize(eyeRay.dir);
 }
 
 
@@ -230,17 +265,6 @@ HitInfo intersectTriangle(vec3 origin, vec3 dir, int index ) {
 	return newHitInfo(t, u, v, tri.tid, normalize(cross(e2,e1)), origin, dir);
 }
 
-float shadow(vec3 origin, vec3 dir ) {
-	for(int i=0;i<int(NO_OF_TRIANGLES);i++)
-	{
-		HitInfo res = intersectTriangle(origin, dir, i);
-		if(res.t>0 ) {
-		   return 0.5;
-		}
-	}
-	return 1.0;
-}
-
 bool closestIntersectingTriangle(Ray ray, inout HitInfo hit){
     float t = hit.t;
     for(int i=0;i<int(NO_OF_TRIANGLES);i++)
@@ -256,10 +280,13 @@ bool closestIntersectingTriangle(Ray ray, inout HitInfo hit){
 
 bool closestIntersectingPlane(Ray ray, inout HitInfo hit){
     float t = hit.t;
+    possibleHit.t = t;
     for(int i = 0; i < 5; i++){
-        HitInfo res = intersectPlane(ray, planes[i]);
-       if(res.t>0 && res.t <= hit.t) {
-          hit = res;
+        intersectPlane(ray, planes[i], possibleHit);
+       if(possibleHit.t>0 && possibleHit.t <= hit.t) {
+          hit = possibleHit;
+          hit.i = i;
+          hit.type = PLANE;
 
        }
     }
@@ -268,11 +295,13 @@ bool closestIntersectingPlane(Ray ray, inout HitInfo hit){
 
 bool closestIntersectingSphere(Ray ray, inout HitInfo hit){
     float t = hit.t;
-
-    for(int i = 0; i < 1; i++){
-        HitInfo res = intersectSphere(ray, spheres[i]);
-       if(res.t>0 && res.t < hit.t) {
-          hit = res;
+    possibleHit.t = t;
+    for(int i = 0; i < NO_SPHERES; i++){
+        intersectSphere(ray, spheres[i], possibleHit);
+       if(possibleHit.t>0 && possibleHit.t < hit.t) {
+          hit = possibleHit;
+          hit.i = i;
+          hit.type = SPHERE;
        }
     }
     return hit.t < t;
@@ -281,10 +310,180 @@ bool closestIntersectingSphere(Ray ray, inout HitInfo hit){
 
 bool closestIntersection(Ray ray, inout HitInfo hit){
     float t = hit.t;
-//    closestIntersectingSphere(ray, hit);
+    closestIntersectingSphere(ray, hit);
     closestIntersectingPlane(ray, hit);
 
-    return hit.t < t;
+    if(hit.t < t){
+        switch(hit.type){
+        case PLANE:
+            Plane p = planes[hit.i];
+            hit.p = ray.origin + hit.t * ray.dir;
+            hit.n = p.n;
+            hit.mat.ambient = p.ambient;
+            hit.mat.diffuse = p.diffuse;
+            hit.mat.specular = p.specular;
+            hit.mat.transmittance = p.transmittance;
+            hit.mat.emission = p.emission;
+            hit.mat.shininess = p.shininess;
+            hit.mat.ior = p.ior;
+            hit.mat.f0 = p.f0;
+            break;
+        case SPHERE:
+            Sphere s = spheres[hit.i];
+            hit.p = ray.origin + hit.t * ray.dir;
+            hit.n = normalize(hit.p - s.center);
+            hit.mat.ambient = s.ambient;
+            hit.mat.diffuse = s.diffuse;
+            hit.mat.specular = s.specular;
+            hit.mat.transmittance = s.transmittance;
+            hit.mat.emission = s.emission;
+            hit.mat.shininess = s.shininess;
+            hit.mat.f0 = s.f0;
+            hit.mat.ior = s.ior;
+            break;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool intersectsAny(Ray ray, float t){
+    possibleHit.t = t;
+    for(int i = 2; i < NO_SPHERES; i++){
+       intersectSphere(ray, spheres[i], possibleHit);
+       if(possibleHit.t > 0 && possibleHit.t < t) {
+          return true;
+       }
+
+    }
+    return false;
+
+}
+
+float shadow(Ray ray, float t) {
+	if(intersectsAny(ray, t)){
+	    return 0.7;
+	}
+	return 1.0;
+}
+
+//vec3 shade0(HitInfo hit, Light l, vec3 E){
+//    vec3 L = l.pos - hit.p;
+//    float d = length(L);
+//    vec3 N = normalize(hit.n);
+//    L = normalize(L);
+//    vec3 H = normalize(E + L);
+//
+//    float attenuation = 1/(k0 + (k1*d) + (k2 * d * d));
+//    vec3 I = l.color;
+//    vec3 amb = hit.mat.ambient.rgb * I;
+//    vec3 diff = I * hit.mat.diffuse.rgb * clamp(dot(N, L), 0.0, 1.0);
+//    vec3 spec = I * hit.mat.specular.rgb * pow(clamp(dot(H, N), 0.0, 1.0), hit.mat.shininess);
+//    vec3 emis = hit.mat.emission.rgb;
+//
+//    return  attenuation * (diff + spec );
+//}
+
+
+vec3 shade0(HitInfo hit, Light l, vec3 E){
+    vec3 L = l.pos - hit.p;
+    float d = length(L);
+    vec3 N = hit.n;
+    L = normalize(L);
+    vec3 H = normalize(E + L);
+
+    float attenuation = 1/(k0 + (k1*d) + (k2 * d * d));
+    vec3 I = l.color;
+    vec3 amb = hit.mat.ambient.rgb;
+    float cos0 = clamp(dot(N, L), 0.0, 1.0);
+    vec3 spec = hit.mat.specular.rgb;
+
+    return attenuation * (amb * I + I * cos0 * spec);
+}
+
+vec4 shade(HitInfo hit, Ray ray){
+    vec3 color = vec3(0);
+    if(length(hit.mat.emission.rgb) > 0){
+        return hit.mat.emission;
+    }
+    for(int i = 0; i < 2; i++){
+      Sphere s = spheres[i];
+      Light l;
+      l.color = s.emission.xyz;
+      l.pos = s.center;
+      color += shade0(hit, l, -ray.dir);
+      Ray ray;
+      ray.origin = hit.p;
+      vec3 L = l.pos - hit.p;
+      ray.dir = normalize(L);
+      float inShadow = shadow(ray, length(L));
+      color *= inShadow;
+    }
+    return vec4(color, 1.0);
+}
+
+vec3 reflectColor(Ray ray){
+    float t = 1000;
+    vec4 color = vec4(0);
+    vec2 tNearFar = intersectCube(ray.origin, ray.dir,  aabb);
+    HitInfo hit;
+    if(tNearFar.x<tNearFar.y){
+        t = tNearFar.y+1;
+        hit.t = t;
+        bool intersectFound = closestIntersection(ray, hit);
+        if(intersectFound){
+            color = shade(hit, ray);
+        }
+    }
+    return color.xyz;
+}
+
+vec4 tracepath(Ray source, float t){
+	vec3 mask = vec3(1);
+	vec3 color = vec3(0);
+	vec3 refCol;
+    Ray ray;
+    ray.origin = source.origin;
+    ray.dir = source.dir;
+    Ray refRay;
+    vec2 range = vec2(0, 1);
+    float fresnel;
+	for(int i = 0; i < iterations; i++){
+		vec2 tNearFar = intersectCube(ray.origin, ray.dir,  aabb);
+		HitInfo hit;
+		if(tNearFar.x<tNearFar.y  ) {
+
+			t = tNearFar.y+1;
+
+			hit.t = t;
+			bool intersectFound = closestIntersection(ray, hit);
+
+			if(intersectFound) {
+			    fresnel = Fresnel(hit.n, -ray.dir, hit.mat.f0);
+			    mask *= fresnel;
+				if(hit.mat.ior > 0){
+                   refRay.origin = hit.p - hit.n;
+                   refRay.dir = reflect(ray.dir, hit.n);
+                   refCol = reflectColor(refRay);
+                   color += refCol  * mask;
+                   mask = hit.mat.diffuse.rgb * (1.0 - fresnel) * (mask / fresnel);
+                   ray.origin = refRay.origin;
+                   ray.dir = refract(ray.dir, hit.n, hit.mat.ior);
+				}
+				else if(hit.mat.f0 > 0){
+                    color += shade(hit, ray).xyz * (1.0 - fresnel) * mask / fresnel;
+                    ray.origin = hit.p + hit.n;
+                    ray.dir = reflect(ray.dir, hit.n);
+				}else{
+                    color += shade(hit, ray).rgb * mask/fresnel;
+                    break;
+				}
+			}
+
+	    }
+	}
+	return vec4(color, 1.0);
+
 }
 
 void main()
@@ -301,32 +500,18 @@ void main()
     HitInfo hit;
 	if(tNearFar.x<tNearFar.y  ) {
 
-		t = tNearFar.y+1; //offset the near intersection to remove the depth artifacts
+		t = tNearFar.y+1;
 
-		hit.t = t;
-		bool intersectFound = closestIntersection(eyeRay, hit);
-		
-		if(intersectFound) {
-         //   N = normalize( N * (1 - val.y - val.z) + N * val.y + N * val.z);
-			vec3 L = (lightPos-hit.p);
-			float d = length(L);
-			L = normalize(L);
-
-			float diffuse = max(0, dot(hit.n, L));
-
-			float attenuationAmount = 1.0/(k0 + (k1*d) + (k2*d*d));
-			diffuse *= attenuationAmount;
-
-			float inShadow = shadow(hit.p + hit.n*0.0001, L) ;
-		//	vec4 color = inShadow * diffuse*mix(texture(textureMap, vec3(hit.u, hit.v, hit.tid)), vec4(1), (hit.tid==255) );
-			vec4 color = diffuse * hit.mat;
-
-            imageStore(scene_img, pos, color);
-            if(hit.t1 == 255) imageStore(scene_img, pos, vec4(1, 1, 0, 1));
-		}
-
+//		hit.t = t;
+//		bool intersectFound = closestIntersection(eyeRay, hit);
+//
+//		if(intersectFound) {
+//			vec4 color = shade(hit);
+//            imageStore(scene_img, pos, color);
+//		}
+		vec4 color = tracepath(eyeRay, t);
+        imageStore(scene_img, pos, color);
 	}
-	//vec4 color = spheres[0].mat;
-	//imageStore(scene_img, pos, color);
+
 }
 

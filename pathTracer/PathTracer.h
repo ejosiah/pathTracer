@@ -22,11 +22,12 @@ class PathTracer : public Scene {
 public:
 	PathTracer() : Scene("Path Tracer scene", 1280, 960) {
 		_useImplictShaderLoad = true;
+		_vsync = false;
 	}
 
 	virtual void init() override {
 		teapot = new Teapot(20);
-		font = Font::Arial(12);
+		font = Font::Arial(12, 0, WHITE);
 		model = new Model("..\\media\\blocks.obj");
 		initQuad();
 		buildTBOs();
@@ -53,10 +54,7 @@ public:
 	}
 
 	virtual void display() override {
-		cam.view = translate(mat4(1), { 0, 0, dist });
-		cam.view = rotate(cam.view, radians(pitch), { 1, 0, 0 });
-		cam.view = rotate(cam.view, radians(yaw), { 0, 1, 0 });
-		cam.view = lookAt({ 0, 0, 120 }, vec3(0, 0, 0), { 0, 1, 0 });
+		cam.view = lookAt({ 0, 0, 100 }, vec3(0, 0, 0), { 0, 1, 0 });
 		tracePath();
 		renderText();
 		glDisable(GL_DEPTH_TEST);
@@ -72,6 +70,7 @@ public:
 		vec3 eyes = column(invMV, 3).xyz;
 		lightPos = eyes;
 		float currentTime = Timer::get().now();
+		float russianRoulette = rngReal(0, 1)();
 		shader("pathtrace")([&](Shader& s) {
 			glBindBuffer(GL_SHADER_STORAGE_BUFFER, tri_ssbo);
 			glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeOf(triangle_ssbo), &triangle_ssbo.triangles[0]);
@@ -89,6 +88,7 @@ public:
 			s.sendUniform3fv("eyes", 1, &eyes[0]);
 			s.sendUniform1i("SAMPLES", samples);
 			s.sendUniform1f("seed", float(currentTime));
+			s.sendUniform1f("russianRoulette", russianRoulette);
 			s.sendUniformMatrix4fv("invMVP", 1, GL_FALSE, value_ptr(invMVP));
 
 			glDispatchCompute(_width / 32, _height / 32, 1);
@@ -115,6 +115,7 @@ public:
 
 	void renderText() {
 		stringstream ss;
+		ss << "FPS: " << fps;
 		font->render(ss.str(), 10, _height - 20);
 	}
 
@@ -126,6 +127,21 @@ public:
 		font->resize(_width, _height);
 		cam.projection = perspective(radians(60.0f), aspectRatio, 0.1f, 1000.0f);
 		initRayTraceImage();
+	}
+
+	virtual void update(float dt) override {
+		quat w(0, angularV * dt);
+		quat q;
+		q = q + (w * q) * 0.5f;
+
+		float t = Timer::get().now() / 1000.0f;
+
+		spheres[0].center = mat4_cast(q) * spheres[0].center;
+		spheres[1].center = mat4_cast(q) * spheres[1].center;
+
+		shader("pathtrace2")([&](Shader& s) {
+			s.sendUniform1f("iGlobalTime", t);
+		});
 	}
 
 	void initRayTraceImage() {
@@ -225,8 +241,8 @@ public:
 		planes = get<0>(res);
 		spheres = get<1>(res);
 
-		vec3 min = vec3(-51, -101, -101);  // model->bound->min();
-		vec3 max = vec3(51, 101, 101);// model->bound->max();
+		vec3 min = vec3(-50, -50, -50);  // model->bound->min();
+		vec3 max = vec3(50, 50, 50);// model->bound->max();
 
 		forShaders({ "pathtrace" }, [&](Shader& s) {
 			size_t size = sizeOf(triangle_ssbo);
@@ -323,4 +339,8 @@ private:
 	vector<ray_tracing::Plane> planes;
 	vector<ray_tracing::Sphere> spheres;
 	Font* font;
+	float speed = _PI * 0.25f;
+	vec3 angularV = vec3{ 0, 1, 0 } *speed;
+	quat rotation;
+
 };
